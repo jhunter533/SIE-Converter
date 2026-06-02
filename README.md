@@ -36,3 +36,4 @@ gcc -g sie_export.c -o sie_to_csv -lsie
 See the usage with `sie_to_csv -h`
 
 This program will try to sanitize filenames just in case allow several command line arguments such as a custom output directory which does not need to be precreated. The program outputs a single csv with the same header information in the first rows as InField. The key difference is Column 0 will be time.
+

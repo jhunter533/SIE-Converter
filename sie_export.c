@@ -36,12 +36,16 @@ void print_version() { printf("sie_to_csv version %s\n", VERSION); }
 
 size_t get_total_samples(void *ch) {
   void *tag = sie_get_tag(ch, "core:output_samples");
+  if (!tag) {
+    tag = sie_get_tag(ch, "core:input_samples");
+  }
   if (tag) {
     char *val = sie_tag_get_value(tag);
     if (val) {
       size_t samples = (size_t)atoll(val);
       sie_free(val);
-      return samples;
+      if (samples > 0)
+        return samples;
     }
   }
   return 0;
@@ -60,6 +64,32 @@ char *get_channel_units(void *ch) {
   char *result = strdup(units);
   sie_free(units);
   return result;
+}
+void sanitize_filename(char *str) {
+  char *src = str;
+  char *dst = str;
+  int last_was_underscore = 0;
+
+  while (*src && (*src == ' ' || *src == '(' || *src == ')'))
+    src++;
+
+  while (*src) {
+    if (*src == ' ' || *src == '(' || *src == ')') {
+      if (!last_was_underscore) {
+        *dst++ = '_';
+        last_was_underscore = 1;
+      }
+    } else {
+      *dst++ = *src;
+      last_was_underscore = 0;
+    }
+    src++;
+  }
+
+  if (dst > str && *(dst - 1) == '_')
+    dst--;
+
+  *dst = '\0';
 }
 
 char *get_test_id_string(void *file) {
@@ -173,15 +203,14 @@ int main(int argc, char *argv[]) {
   }
 
   const char *sie_file = argv[optind];
-
   if (strcmp(output_dir, ".") != 0) {
     char mkdir_cmd[2048];
-    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", output_dir);
-    if (system(mkdir_cmd) != 0)
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p \"%s\"", output_dir);
+    if (system(mkdir_cmd) != 0) {
       fprintf(stderr, "Warning: could not create output directory %s\n",
               output_dir);
+    }
   }
-
   if (verbose)
     printf("Opening file: %s\n", sie_file);
 
@@ -243,7 +272,7 @@ int main(int argc, char *argv[]) {
         return 1;
       }
       const char *full_name = sie_get_name(ch);
-      channels[channel_count].channel = sie_retain(ch); // retain to keep alive
+      channels[channel_count].channel = sie_retain(ch);
       channels[channel_count].id = ch_id;
       channels[channel_count].short_name = get_channel_short_name(full_name);
       channels[channel_count].units = get_channel_units(ch);
@@ -256,7 +285,7 @@ int main(int argc, char *argv[]) {
       }
     }
   }
-  sie_release(channel_iterator); // safe to release now – channels are retained
+  sie_release(channel_iterator);
 
   if (channel_count == 0) {
     fprintf(stderr, "No channels selected for export.\n");
@@ -266,7 +295,15 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  size_t total_samples = get_total_samples(channels[0].channel);
+  size_t total_samples = 0;
+  int samples_channel_idx = -1;
+  for (int i = 0; i < channel_count; i++) {
+    total_samples = get_total_samples(channels[i].channel);
+    if (total_samples > 0) {
+      samples_channel_idx = i;
+      break;
+    }
+  }
   if (total_samples == 0) {
     fprintf(stderr, "Error: Could not determine total number of samples.\n");
     for (int i = 0; i < channel_count; i++) {
@@ -274,11 +311,17 @@ int main(int argc, char *argv[]) {
       free(channels[i].units);
       sie_release(channels[i].channel);
     }
+
     free(channels);
     free(test_id);
     sie_release(file);
     sie_context_done(context);
     return 1;
+  }
+  if (verbose && samples_channel_idx != 0) {
+    printf("Using channel %d (%s) for sample count\n",
+           channels[samples_channel_idx].id,
+           channels[samples_channel_idx].short_name);
   }
   if (verbose) {
     printf("Total samples per channel: %zu\n", total_samples);
@@ -343,7 +386,7 @@ int main(int argc, char *argv[]) {
         sie_float64 *vdata = sie_output_get_float64(output, 1);
         if (tdata && vdata) {
           for (size_t i = 0; i < num_rows; i++) {
-            if (idx == 0) {
+            if (idx == samples_channel_idx) {
               time_data[samples_read + i] = tdata[i];
             }
             channels[idx].data[samples_read + i] = vdata[i];
@@ -379,16 +422,22 @@ int main(int argc, char *argv[]) {
                   "100%%  Channels loaded\n");
 
   char output_filename[2048];
+  char san_base[1024];
   const char *base = basename((char *)sie_file);
-  char *dot = strrchr(base, '.');
+  strncpy(san_base, base, sizeof(san_base) - 1);
+  san_base[sizeof(san_base) - 1] = '\0';
+
+  char *dot = strrchr(san_base, '.');
   if (dot)
     *dot = '\0';
+  sanitize_filename(san_base);
+
   if (output_dir[strlen(output_dir) - 1] == '/')
     snprintf(output_filename, sizeof(output_filename), "%s%s.csv", output_dir,
-             base);
+             san_base);
   else
     snprintf(output_filename, sizeof(output_filename), "%s/%s.csv", output_dir,
-             base);
+             san_base);
 
   FILE *out = fopen(output_filename, "w");
   if (!out) {
